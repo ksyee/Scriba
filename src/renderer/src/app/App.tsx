@@ -32,6 +32,8 @@ export default function App() {
   const [micStatus, setMicStatus] = useState<"connected" | "disconnected">("disconnected");
   const [micDevices, setMicDevices] = useState<MediaDeviceInfo[]>([]);
   const [selectedMicId, setSelectedMicId] = useState<string>("");
+  const [isProcessingFile, setIsProcessingFile] = useState(false);
+  const [fileProcessProgress, setFileProcessProgress] = useState<number | null>(null);
 
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const entryIdRef = useRef(0);
@@ -164,9 +166,13 @@ export default function App() {
     // Convert to PCM16
     const pcmBuffer = float32ToPCM16(resampled);
 
+    // Extract the previous text context as a prompt for the model
+    // This helps the model understand the ongoing sentence, reducing hallucinations
+    const recentText = fullTranscriptRef.current.slice(-2).join(" ");
+
     // Send to Whisper
     setWhisperStatus("processing");
-    const result = await window.electronAPI.whisperTranscribe(pcmBuffer, selectedLang);
+    const result = await window.electronAPI.whisperTranscribe(pcmBuffer, selectedLang, recentText || undefined);
     setWhisperStatus("ready");
 
     if (result.success && result.text && result.text.trim()) {
@@ -311,6 +317,65 @@ export default function App() {
       window.electronAPI.removeOllamaListeners();
     }
   }, [selectedModel]);
+
+  // Handle file upload: open native dialog and send file path to backend for ffmpeg decoding
+  const handleFileUpload = useCallback(async () => {
+    if (!window.electronAPI) return;
+
+    const filePath = await window.electronAPI.selectAudioFile();
+    if (!filePath) {
+      // User canceled the dialog
+      return;
+    }
+
+    setIsProcessingFile(true);
+    setFileProcessProgress(0);
+    setTranscriptEntries([]);
+    setMinutesContent("");
+    entryIdRef.current = 0;
+    fullTranscriptRef.current = [];
+    setWhisperStatus("processing");
+
+    // Listen to progress updates
+    window.electronAPI.onWhisperFileProgress((progress, text) => {
+      if (progress >= 0 && progress <= 100) {
+        setFileProcessProgress(progress);
+      }
+
+      if (text) {
+        fullTranscriptRef.current.push(text);
+        setTranscriptEntries((prev) => [
+          ...prev,
+          {
+            id: entryIdRef.current++,
+            time: formatTime(0), // Ffmpeg stream doesn't easily give exact chunk start time without extensive math, leaving at 00:00 for simplicty or just counting up.
+            text,
+          },
+        ]);
+      }
+    });
+
+    try {
+      const result = await window.electronAPI.whisperTranscribeFile(filePath, selectedLang);
+
+      if (!result.success) {
+        throw new Error(result.error);
+      }
+
+      setWhisperStatus("ready");
+    } catch (error: any) {
+      console.error("File processing error:", error);
+      setErrorMessage(
+        "오디오 파일 처리에 실패했습니다: " + (error.message || "알 수 없는 에러")
+      );
+      setTimeout(() => setErrorMessage(null), 5000);
+      setWhisperStatus("ready");
+    } finally {
+      setIsProcessingFile(false);
+      setFileProcessProgress(null);
+      window.electronAPI.removeWhisperListeners();
+    }
+  }, [selectedLang, formatTime]);
 
   const clearTranscript = useCallback(() => {
     setTranscriptEntries([]);
@@ -526,9 +591,12 @@ export default function App() {
         <RecordingControl
           isRecording={isRecording}
           isPaused={false}
+          isProcessingFile={isProcessingFile}
+          fileProcessProgress={fileProcessProgress}
           duration={duration}
           onToggleRecording={toggleRecording}
           onStop={stopRecording}
+          onFileUpload={handleFileUpload}
         />
 
         {/* Panels */}

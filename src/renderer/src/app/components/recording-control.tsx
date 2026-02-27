@@ -1,12 +1,16 @@
-import { Mic, MicOff, Square } from "lucide-react";
+import { useRef } from "react";
+import { Mic, MicOff, Square, FileAudio } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 
-interface RecordingControlProps {
+export interface RecordingControlProps {
   isRecording: boolean;
   isPaused: boolean;
+  isProcessingFile: boolean;
+  fileProcessProgress?: number | null;
   duration: number;
   onToggleRecording: () => void;
   onStop: () => void;
+  onFileUpload?: () => void;
 }
 
 function formatDuration(seconds: number) {
@@ -20,10 +24,14 @@ function formatDuration(seconds: number) {
 export function RecordingControl({
   isRecording,
   isPaused,
+  isProcessingFile,
+  fileProcessProgress,
   duration,
   onToggleRecording,
   onStop,
+  onFileUpload,
 }: RecordingControlProps) {
+
   return (
     <div
       className="flex flex-col items-center gap-5 py-6"
@@ -32,7 +40,8 @@ export function RecordingControl({
       {/* Waveform visualization */}
       <div className="flex items-center gap-[3px] h-12">
         {Array.from({ length: 32 }).map((_, i) => {
-          const baseHeight = isRecording
+          const active = isRecording || isProcessingFile;
+          const baseHeight = active
             ? 8 + Math.sin(i * 0.5) * 20 + Math.random() * 16
             : 4;
           return (
@@ -40,12 +49,14 @@ export function RecordingControl({
               key={i}
               className="w-[3px] rounded-full"
               style={{
-                background: isRecording
-                  ? `linear-gradient(to top, #ef4444, #f97316)`
+                background: active
+                  ? isProcessingFile
+                    ? `linear-gradient(to top, #8b5cf6, #6366f1)`
+                    : `linear-gradient(to top, #ef4444, #f97316)`
                   : "rgba(255,255,255,0.1)",
               }}
               animate={{
-                height: isRecording ? [baseHeight * 0.3, baseHeight, baseHeight * 0.5] : 4,
+                height: active ? [baseHeight * 0.3, baseHeight, baseHeight * 0.5] : 4,
               }}
               transition={{
                 duration: 0.4 + Math.random() * 0.4,
@@ -65,14 +76,32 @@ export function RecordingControl({
         style={{
           fontFamily: "'JetBrains Mono', monospace",
           fontSize: "32px",
-          color: isRecording ? "#f87171" : "rgba(255,255,255,0.3)",
+          color: isRecording
+            ? "#f87171"
+            : isProcessingFile
+              ? "#a78bfa"
+              : "rgba(255,255,255,0.3)",
         }}
       >
-        {formatDuration(duration)}
+        {isProcessingFile
+          ? `처리 중${fileProcessProgress != null ? `... ${fileProcessProgress}%` : '...'}`
+          : formatDuration(duration)}
       </div>
 
       {/* Controls */}
       <div className="flex items-center gap-4">
+        {/* File upload button */}
+        <motion.button
+          onClick={onFileUpload}
+          disabled={isRecording || isProcessingFile}
+          className="w-12 h-12 rounded-xl bg-white/5 border border-white/10 flex items-center justify-center text-white/40 hover:text-white/70 hover:bg-white/10 transition-all cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed"
+          whileHover={{ scale: 1.05 }}
+          whileTap={{ scale: 0.95 }}
+          title="오디오 파일 가져오기"
+        >
+          <FileAudio size={18} />
+        </motion.button>
+
         <AnimatePresence mode="wait">
           {isRecording && (
             <motion.button
@@ -90,6 +119,7 @@ export function RecordingControl({
         <button
           onClick={onToggleRecording}
           className="relative cursor-pointer"
+          disabled={isProcessingFile}
         >
           {/* Pulse rings */}
           {isRecording && (
@@ -120,9 +150,10 @@ export function RecordingControl({
               boxShadow: isRecording
                 ? "0 0 30px rgba(239,68,68,0.4)"
                 : "0 0 20px rgba(99,102,241,0.3)",
+              opacity: isProcessingFile ? 0.4 : 1,
             }}
-            whileHover={{ scale: 1.05 }}
-            whileTap={{ scale: 0.95 }}
+            whileHover={{ scale: isProcessingFile ? 1 : 1.05 }}
+            whileTap={{ scale: isProcessingFile ? 1 : 0.95 }}
           >
             {isRecording ? (
               <MicOff size={24} className="text-white" />
@@ -137,7 +168,11 @@ export function RecordingControl({
         className="text-white/30"
         style={{ fontSize: "12px", fontFamily: "'Inter', sans-serif" }}
       >
-        {isRecording ? "녹음 중... 마이크 버튼을 눌러 중지" : "마이크 버튼을 눌러 녹음 시작"}
+        {isProcessingFile
+          ? "오디오 파일 처리 중..."
+          : isRecording
+            ? "녹음 중... 마이크 버튼을 눌러 중지"
+            : "마이크 버튼을 눌러 녹음 시작 · 파일 아이콘으로 오디오 파일 가져오기"}
       </p>
     </div>
   );
