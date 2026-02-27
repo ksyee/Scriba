@@ -1,6 +1,11 @@
 import path from 'path'
 import { app } from 'electron'
 import fs from 'fs'
+import ffmpeg from 'fluent-ffmpeg'
+import ffmpegInstaller from '@ffmpeg-installer/ffmpeg'
+
+// Setup ffmpeg path
+ffmpeg.setFfmpegPath(ffmpegInstaller.path)
 
 let whisperModule: any = null
 
@@ -9,6 +14,8 @@ export class WhisperService {
   private modelPath: string = ''
 
   async init(modelName: string = 'base'): Promise<void> {
+    // Release previous context if exists
+    this.dispose()
     // Dynamically import whisper.node
     if (!whisperModule) {
       try {
@@ -66,30 +73,183 @@ export class WhisperService {
     console.log(`Model downloaded to: ${destPath}`)
   }
 
-  async transcribe(pcmData: ArrayBuffer, language: string = 'ko'): Promise<string> {
+  async transcribe(pcmData: any, language: string = 'ko', prompt?: string): Promise<string> {
     if (!this.context) {
       throw new Error('Whisper not initialized. Call init() first.')
     }
 
     try {
+      // Electron IPC often converts ArrayBuffer to Uint8Array/Buffer in the main process.
+      // @fugood/whisper.node strictly expects an ArrayBuffer.
+      let bufferToProcess = pcmData
+      if (Buffer.isBuffer(pcmData) || pcmData instanceof Uint8Array) {
+        bufferToProcess = pcmData.buffer.slice(pcmData.byteOffset, pcmData.byteOffset + pcmData.byteLength)
+      } else if (pcmData && pcmData.buffer instanceof ArrayBuffer) {
+        bufferToProcess = pcmData.buffer
+      }
+
       // transcribeData returns { stop, promise }
-      const { promise } = this.context.transcribeData(pcmData, {
+      const options: any = {
         language,
         maxLen: 0,
         translate: false,
         temperature: 0.0,
-      })
+      }
+      if (prompt) {
+        options.prompt = prompt
+      }
+
+      const { promise } = this.context.transcribeData(bufferToProcess, options)
 
       const result = await promise
 
-      if (result && result.result && result.result.length > 0) {
-        return result.result.map((segment: any) => segment.text).join(' ').trim()
+      if (result) {
+        if (typeof result.result === 'string') {
+          return result.result.trim()
+        } else if (result.segments && Array.isArray(result.segments)) {
+          return result.segments.map((segment: any) => segment.text).join(' ').trim()
+        }
       }
       return ''
     } catch (error) {
       console.error('Transcription error:', error)
       throw error
     }
+  }
+
+  async transcribeFile(
+    filePath: string,
+    language: string = 'ko',
+    onProgress: (progress: number, text: string) => void
+  ): Promise<string> {
+    if (!this.context) {
+      throw new Error('Whisper not initialized. Call init() first.')
+    }
+
+    return new Promise((resolve, reject) => {
+      const SAMPLE_RATE = 16000
+      const CHUNK_DURATION_SEC = 30
+      const BYTES_PER_SAMPLE = 2 // 16-bit PCM
+      const CHUNK_BYTE_SIZE = SAMPLE_RATE * BYTES_PER_SAMPLE * CHUNK_DURATION_SEC
+
+      let audioStream: Buffer[] = []
+      let totalBytesReceived = 0
+      let fullTranscript: string[] = []
+
+      // To calculate progress, we need file duration
+      ffmpeg.ffprobe(filePath, (err, metadata) => {
+        let durationSec = 0
+        if (!err && metadata && metadata.format && metadata.format.duration) {
+          durationSec = metadata.format.duration
+        }
+
+        const command = ffmpeg(filePath)
+          .noVideo()
+          .audioChannels(1)
+          .audioFrequency(SAMPLE_RATE)
+          .audioCodec('pcm_s16le')
+          .format('s16le')
+          .on('error', (err) => {
+            console.error('FFmpeg decoding error:', err)
+            reject(err)
+          })
+
+        const ffStream = command.pipe()
+        let processPromise = Promise.resolve()
+
+        ffStream.on('data', (chunk: Buffer) => {
+          audioStream.push(chunk)
+          totalBytesReceived += chunk.length
+
+          const currentBufferLength = audioStream.reduce((acc, b) => acc + b.length, 0)
+          if (currentBufferLength >= CHUNK_BYTE_SIZE) {
+            // Extract exactly one chunk
+            const merged = Buffer.concat(audioStream)
+            const chunkToProcess = merged.slice(0, CHUNK_BYTE_SIZE)
+            audioStream = [merged.slice(CHUNK_BYTE_SIZE)] // keep remainder
+
+            processPromise = processPromise.then(async () => {
+              const buffer = chunkToProcess.buffer.slice(
+                chunkToProcess.byteOffset,
+                chunkToProcess.byteOffset + chunkToProcess.byteLength
+              )
+
+              const prompt = fullTranscript.slice(-2).join(' ')
+              const { promise } = this.context.transcribeData(buffer, {
+                language,
+                maxLen: 0,
+                translate: false,
+                temperature: 0.0,
+                prompt: prompt || undefined,
+              })
+
+              const result = await promise
+              if (result) {
+                let text = ''
+                if (typeof result.result === 'string') {
+                  text = result.result.trim()
+                } else if (result.segments && Array.isArray(result.segments)) {
+                  text = result.segments.map((s: any) => s.text).join(' ').trim()
+                }
+
+                if (text) {
+                  fullTranscript.push(text)
+                }
+
+                if (durationSec > 0) {
+                  // Approximate progress based on bytes processed vs expected total
+                  const expectedTotalBytes = durationSec * SAMPLE_RATE * BYTES_PER_SAMPLE
+                  const progress = Math.min(100, Math.round((totalBytesReceived / expectedTotalBytes) * 100))
+                  onProgress(progress, text)
+                } else {
+                  onProgress(-1, text)
+                }
+              }
+            })
+          }
+        })
+
+        ffStream.on('end', () => {
+          processPromise = processPromise.then(async () => {
+            // Process any remaining audio
+            if (audioStream.length > 0) {
+              const merged = Buffer.concat(audioStream)
+              if (merged.length > 0) {
+                const buffer = merged.buffer.slice(
+                  merged.byteOffset,
+                  merged.byteOffset + merged.byteLength
+                )
+
+                const prompt = fullTranscript.slice(-2).join(' ')
+                const { promise } = this.context.transcribeData(buffer, {
+                  language,
+                  maxLen: 0,
+                  translate: false,
+                  temperature: 0.0,
+                  prompt: prompt || undefined,
+                })
+
+                const result = await promise
+                if (result) {
+                  let text = ''
+                  if (typeof result.result === 'string') {
+                    text = result.result.trim()
+                  } else if (result.segments && Array.isArray(result.segments)) {
+                    text = result.segments.map((s: any) => s.text).join(' ').trim()
+                  }
+
+                  if (text) {
+                    fullTranscript.push(text)
+                    onProgress(100, text)
+                  }
+                }
+              }
+            }
+            resolve(fullTranscript.join('\n'))
+          }).catch(reject)
+        })
+      })
+    })
   }
 
   dispose(): void {

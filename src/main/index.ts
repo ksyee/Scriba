@@ -1,4 +1,4 @@
-import { app, shell, BrowserWindow, ipcMain } from 'electron'
+import { app, shell, BrowserWindow, ipcMain, dialog } from 'electron'
 import { join } from 'path'
 import { WhisperService } from './services/whisper'
 import { OllamaService } from './services/ollama'
@@ -57,6 +57,20 @@ function setupWindowIPC(): void {
   ipcMain.on('window:close', () => {
     mainWindow?.close()
   })
+
+  ipcMain.handle('dialog:selectAudioFile', async () => {
+    if (!mainWindow) return null
+    const result = await dialog.showOpenDialog(mainWindow, {
+      title: '오디오 파일 선택',
+      filters: [{ name: 'Audio Files', extensions: ['mp3', 'm4a', 'wav', 'ogg'] }],
+      properties: ['openFile']
+    })
+
+    if (result.canceled || result.filePaths.length === 0) {
+      return null
+    }
+    return result.filePaths[0]
+  })
 }
 
 // Whisper IPC handlers
@@ -72,12 +86,28 @@ function setupWhisperIPC(): void {
     }
   })
 
-  ipcMain.handle('whisper:transcribe', async (_event, pcmData: ArrayBuffer, lang: string) => {
+  ipcMain.handle('whisper:transcribe', async (_event, pcmData: ArrayBuffer, lang: string, prompt?: string) => {
     if (!whisperService) {
       return { success: false, error: 'Whisper not initialized' }
     }
     try {
-      const text = await whisperService.transcribe(pcmData, lang)
+      const text = await whisperService.transcribe(pcmData, lang, prompt)
+      return { success: true, text }
+    } catch (error: any) {
+      return { success: false, error: error.message }
+    }
+  })
+
+  ipcMain.handle('whisper:transcribeFile', async (_event, filePath: string, lang: string) => {
+    if (!whisperService) {
+      return { success: false, error: 'Whisper not initialized' }
+    }
+    try {
+      const text = await whisperService.transcribeFile(filePath, lang, (progress, newText) => {
+        if (mainWindow) {
+          mainWindow.webContents.send('whisper:fileProgress', progress, newText)
+        }
+      })
       return { success: true, text }
     } catch (error: any) {
       return { success: false, error: error.message }
